@@ -1,0 +1,489 @@
+---
+title: "Data Wrangling Project"
+author: "Jyoti Shivhare"
+date: "March 29, 2018"
+output:
+  html_document:
+    df_print: paged
+  html_notebook:
+    highlight: tango
+    theme: default
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## New York City Taxi Trip Duration {.tabset .tabset-fade .tabset-pills}
+
+### Introduction
+
+The objective of this project is to explore the Kaggle NYC Taxi Trip dataset and conclude some interesting questions like which is the busiest place in NYC for taxi, where are the shortest trips, how these trips are affected due to weather forecast. We may also be able to predict the duration of taxi rides in NYC based on features like trip coordinates or pickup date and time. The data comes in the shape of 1.5 million training observations (train.csv) and 630k test observation (test.csv). 
+
+In this notebook, we will first study and visualise the original data, engineer new features, and access potential outliers. Then we add an external data sets on the NYC weather. 
+
+We visualise and analyse the new features within these data sets and their impact on the target trip_duration values.
+This will help the consumer of the analysis to better judge the affects of various factors on the taxi trips in this city.
+
+
+### Packages required
+
+Following are the packages that are required
+
+```{r, message = FALSE, warning = FALSE}
+# For visualisations
+library('ggplot2') 
+library('scales')
+library('grid')
+library('RColorBrewer')
+library('corrplot') 
+library('alluvial')
+
+ # data manipulation
+library('dplyr')
+library('data.table')
+
+ # input/output
+library('readr')
+
+ # data wrangling
+library('tibble')
+library('tidyr')
+
+ # string manipulation
+library('stringr')
+
+ # factor manipulation
+library('forcats')
+
+# date and time
+library('lubridate')
+
+ # geospatial locations
+library('geosphere')
+
+ # maps
+library('leaflet')
+library('leaflet.extras')
+library('maps')
+
+ # modelling
+library('xgboost')
+library('caret')
+```
+
+### Data Preparation
+
+We are using two datasets which we'll be adding later on. Right now we'll look at the first dataset and further we'll discuss about the second one which the weather reports for NYC.
+
+**First Dataset** - This dataset is based on the 2016 NYC Yellow Cab trip record data made available in Big Query on Google Cloud Platform. The data was originally published by the NYC Taxi and Limousine Commission (TLC). Based on individual trip attributes, participants should predict the duration of each trip in the test set.
+
+The data source can be found [here](https://www.kaggle.com/c/nyc-taxi-trip-duration/data)
+
+__File descriptions__
+
+- **train.csv** - the training set (contains 1458644 trip records)
+- **test.csv** - the testing set (contains 625134 trip records)
+
+
+__Data fields__
+
+- **id** - a unique identifier for each trip
+
+- **vendor_id** - a code indicating the provider associated with the trip record
+
+- **pickup_datetime** - date and time when the meter was engaged
+
+- **dropoff_datetime** - date and time when the meter was disengaged
+
+- **passenger_count** - the number of passengers in the vehicle (driver entered value)
+
+- **pickup_longitude** - the longitude where the meter was engaged
+
+- **pickup_latitude** - the latitude where the meter was engaged
+
+- **dropoff_longitude** - the longitude where the meter was disengaged
+
+- **dropoff_latitude** - the latitude where the meter was disengaged
+
+- **store_and_fwd_flag** - This flag indicates whether the trip record was held in vehicle memory before sending to the vendor because the vehicle did not have a connection to the server - Y=store and forward; N=not a store and forward trip
+
+- **trip_duration** - duration of the trip in seconds
+
+
+
+
+
+1. __Load Data__
+
+We use *data.table's* fread function to speed up reading in the data:
+
+```{r warning=FALSE, results=FALSE}
+train <- as.tibble(fread('train.csv'))
+test <- as.tibble(fread('test.csv'))
+
+```
+2. __File structure and content__
+
+Let's have an overview of the data sets using the *summary* and *glimpse* tools. First the training data:
+
+```{r}
+summary(train)
+```
+
+
+```{r}
+glimpse(train)
+```
+
+And then the testing data:
+
+```{r}
+summary(test)
+```
+
+
+```{r}
+glimpse(test)
+```
+
+We find:
+
+- *vendor\_id* only takes the values 1 or 2, presumably to differentiate two taxi companies
+
+- *pickup\_datetime* and (in the training set) *dropoff\_datetime* are combinations of date and time that we will have to re-format into a more useful shape
+
+- *passenger\_count* takes a median of 1 and a maximum of 9 in both data sets
+
+- The *pickup/dropoff\_longitute/latitute* describes the geographical coordinates where the meter was activate/deactivated.
+
+- *store\_and\_fwd\_flag* is a flag that indicates whether the trip data was sent immediately to the vendor ("N") or held in the memory of the taxi because there was no connection to the server ("Y"). Maybe there could be a correlation with certain geographical areas with bad reception?
+
+- *trip\_duration:* our target feature in the training data is measured in seconds.
+
+
+3. __Missing values__
+
+Missing Values indicate how much we don't know about our data. Many modelling procedures break down when missing values are involved and the corresponding rows will either have to be removed completely or the values need to be estimated somehow.
+
+Here, we are in the fortunate position that our data is complete and there are no missing values:
+
+```{r}
+sum(is.na(train))
+sum(is.na(test))
+```
+
+4. __Combining train and test__
+
+In preparation for our eventual modelling analysis we combine the *train* and *test* data sets into a single one. I find it generally best not to examine the *test* data too closely, since this bears the risk of overfitting your analysis to this data. However, a few simple consistency checks between the two data sets can be of advantage.
+
+```{r}
+combine <- bind_rows(train %>% mutate(dset = "train"), 
+                     test %>% mutate(dset = "test",
+                                     dropoff_datetime = NA,
+                                     trip_duration = NA))
+combine <- combine %>% mutate(dset = factor(dset))
+```
+
+
+5. __Reformating features__
+
+For our following analysis, we will turn the data and time from characters into *date* objects. We also recode *vendor\_id* as a factor. This makes it easier to visualise relationships that involve these features.
+
+```{r}
+train <- train %>%
+  mutate(pickup_datetime = ymd_hms(pickup_datetime),
+         dropoff_datetime = ymd_hms(dropoff_datetime),
+         vendor_id = factor(vendor_id),
+         passenger_count = factor(passenger_count))
+```
+
+
+6. __Consistency check__
+
+It is worth checking whether the *trip\_durations* are consistent with the intervals between the *pickup\_datetime* and *dropoff\_datetime*. Presumably the former were directly computed from the latter, but you never know. Below, the *check* variable shows "TRUE" if the two intervals are not consistent:
+
+```{r}
+train %>%
+  mutate(check = abs(int_length(interval(dropoff_datetime,pickup_datetime)) + trip_duration) > 0) %>%
+  select(check, pickup_datetime, dropoff_datetime, trip_duration) %>%
+  group_by(check) %>%
+  count()
+```
+
+And we find that everything fits perfectly. 
+
+
+
+
+**Data Cleaning:**
+
+Even after cleaning missing values there will be some rows which will make no sense depending upon every use case which we will have to check and clean those rows.
+The aim here is to remove trips that have errorneous or improper features; for example- extreme trip durations or very low average speed.
+
+While there might also be a number of bogus trip durations in the test data we shouldn't be able to predict them in any case (unless there were some real correlations). By removing these training data values we will make our model more robust and more likely to generalise to unseen data, which is always our primary goal in machine learning.
+
+1. **Longer than a day**
+
+We start with the few trips that pretend to have taken several days to complete:
+
+```{r warning = FALSE}
+jfk_coord <- tibble(lon = -73.778889, lat = 40.639722)
+la_guardia_coord <- tibble(lon = -73.872611, lat = 40.77725)
+
+pick_coord <- train %>%
+  select(pickup_longitude, pickup_latitude)
+drop_coord <- train %>%
+  select(dropoff_longitude, dropoff_latitude)
+train$dist <- distCosine(pick_coord, drop_coord)
+train$bearing = bearing(pick_coord, drop_coord)
+
+train$jfk_dist_pick <- distCosine(pick_coord, jfk_coord)
+train$jfk_dist_drop <- distCosine(drop_coord, jfk_coord)
+train$lg_dist_pick <- distCosine(pick_coord, la_guardia_coord)
+train$lg_dist_drop <- distCosine(drop_coord, la_guardia_coord)
+
+train <- train %>%
+  mutate(speed = dist/trip_duration*3.6,
+         date = date(pickup_datetime),
+         month = month(pickup_datetime, label = TRUE),
+         wday = wday(pickup_datetime, label = TRUE),
+         wday = fct_relevel(wday, c("Mon", "Tues", "Wed", "Thurs", "Fri", "Sat", "Sun")),
+         hour = hour(pickup_datetime),
+         work = (hour %in% seq(8,18)) & (wday %in% c("Mon","Tues","Wed","Thurs","Fri")),
+         jfk_trip = (jfk_dist_pick < 2e3) | (jfk_dist_drop < 2e3),
+         lg_trip = (lg_dist_pick < 2e3) | (lg_dist_drop < 2e3),
+         blizzard = !((date < ymd("2016-01-22") | (date > ymd("2016-01-29"))) )
+         )
+```
+
+
+
+```{r warning = FALSE}
+day_plus_trips <- train  %>%
+  filter(trip_duration > 24*3600)
+
+day_plus_trips %>% select(pickup_datetime, dropoff_datetime, speed)
+
+```
+
+
+
+We find nothing out of the ordinary here. While a trip to JFK can seem like an eternity if your flight is boarding soon, it is unlikely to take this long in real time. The average taxi speeds don't look very likely either. 
+
+**Decision:** These values should be removed from the training data set for continued exploration and modelling.
+
+
+2. **Close to 24 hours**
+
+Call me crazy, but I don't think it is inconceivable that someone takes a taxi for a trip that lasts almost a day (with breaks, of course). In very rare occasions this might happen; provided, of course, that the distance travelled was sufficiently long.
+
+Here we define day-long trips as taking between 22 and 24 hours, which covers a small peak in our raw *trip\_duration* distribution. Those are the top 5 direct distances (in m) among the day-long trips:
+
+```{r}
+day_trips <- train %>%
+  filter(trip_duration < 24*3600 & trip_duration > 10*3600)
+
+day_trips %>% 
+  arrange(desc(dist)) %>%
+  select(dist, pickup_datetime, dropoff_datetime, speed) %>%
+  head(5)
+```
+
+The top one is about 60 km (about 37 miles), which is not particularly far taking around 24 hours which makes no sense.
+
+**Decision:** We will remove *trip\_durations* longer than 10 hours assuming no actual trip would be more than this.
+
+
+3. **Shorter than a few minutes**
+
+On the other side of the *trip\_duration* distribution we have those rides that appear to only have lasted for a couple of minutes. While such short trips are entirely possible, let's check their durations and speeds to make sure that they are realistic.
+
+```{r}
+min_trips <- train %>%
+  filter(trip_duration < 5*60)
+
+min_trips %>% 
+  arrange(dist) %>%
+  select(dist, pickup_datetime, dropoff_datetime, speed) %>%
+  head(5)
+```
+
+4. **Zero-distance trips**
+
+In doing so, we notice that there are a relatively large number of zero-distance trips:
+
+```{r}
+zero_dist <- train %>%
+  filter(near(dist,0))
+nrow(zero_dist)
+```
+
+What are their nominal top durations?
+
+```{r}
+zero_dist %>%
+  arrange(desc(trip_duration)) %>%
+  select(trip_duration, pickup_datetime, dropoff_datetime, vendor_id) %>%
+  head(5)
+```
+
+There really are a few taxis where the data wants to tell us that they have not moved at all for about a day. While carrying a passenger. We choose not to believe the data in this case.
+
+Once we remove the extreme cases, this is what the distribution looks like:
+
+```{r fig.align = 'default', warning = FALSE}
+zero_dist %>%
+  filter(trip_duration < 6000) %>%
+  ggplot(aes(trip_duration, fill = vendor_id)) +
+  geom_histogram(bins = 50) +
+  scale_x_log10()
+```
+
+We find:
+
+- *trip\_durations* of about a minute may be possible assuming that a customer got into a taxi but then changed their mind before the taxi could move. 
+- Most trips in the less-than-a-minute-group were from vendor 1, whereas the 10-minute-group predominantly consists of vendor 2 taxis.
+
+**Conclusion:** We will remove those trips that took more than a minute for our continued analysis. 
+
+Intersting findings:
+
+- Most distances are in fact short, which means that combined with setting an average speed limit we should be able to remove those values that are way beyond being realistic. This should also get rid of many trips that appear to have durations of seconds only.
+
+**Conclusion:** We impose a lower *trip\_duration* limit of 10 seconds and a (very conservative) speed limit of 100 km/h (62 mph). (Remember that this refers to the direct distance.)
+
+5. **The most fraudulent trips**
+
+Every data set has a few entries that are just flat out ridiculous. Here are the best ones from this one, with pickup or dropoff locations more than 300 km away from NYC (JFK airport)
+
+```{r}
+long_dist <- train %>%
+  filter( (jfk_dist_pick > 3e5) | (jfk_dist_drop > 3e5) )
+long_dist_coord <- long_dist %>%
+  select(lon = pickup_longitude, lat = pickup_latitude)
+
+long_dist %>%
+  select(id, jfk_dist_pick, jfk_dist_drop, dist, trip_duration, speed) %>%
+  arrange(desc(jfk_dist_pick))
+```
+
+Many zero-distance trips with more than a minute duration, which we would remove anyway. But just out of curiousity, where did they happen? (We will again use the amazing *leaflet* package, this time with individual markers that give us *id* and direct *distance* information for mouse-over and click actions.)
+
+```{r  fig.align = 'default', warning = FALSE, out.width="100%"}
+leaflet(long_dist_coord) %>%
+  addTiles() %>%
+  setView(-92.00, 41.0, zoom = 4) %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  addMarkers(popup = ~as.character(long_dist$dist), label = ~as.character(long_dist$id))
+```
+
+
+There are two NYC taxis near San Francisco, but there are 9 other taxis going to the ocean which is clearly not a valid scenario until they have submarines issued. :P 
+
+These long-distance locations represent outliers that should be removed to improve the robustness of predictive models.
+
+
+6. **Final cleaning**
+
+Here we apply the cleaning filters that are discussed above. This code block is likely to expand as the analysis progresses.
+
+```{r}
+train <- train %>%
+  filter(trip_duration < 22*3600,
+         dist > 0 | (near(dist, 0) & trip_duration < 60),
+         jfk_dist_pick < 3e5 & jfk_dist_drop < 3e5,
+         trip_duration > 10,
+         speed < 100)
+```
+
+
+7. **Adding Weather reports dataset to our analysis**
+
+
+About the dataset: This data was collected from the National Weather Service. It contains the first six months of 2016, for a weather station in central park. Click [here](https://www.kaggle.com/mathijs/weather-data-in-new-york-city-2016) to find out more about the weather reports.
+
+For each day, it contains:
+
+- minimum temperature
+
+- maximum temperature
+
+- average temperature
+
+- precipitation
+
+- new snow fall
+
+- current snow depth 
+
+The temperature is measured in Fahrenheit and the depth is measured in inches. T means that there is a trace of precipitation.
+
+
+- **Data Import**
+
+```{r}
+weather <- as.tibble(fread("weather_data_nyc_centralpark_2016.csv"))
+```
+
+
+- **Data Overview**
+
+```{r}
+glimpse(weather)
+```
+
+
+We turn the *date* into a *lubridate* object and convert the traces ("T") of rain and snow into small numeric amounts. We also save the maximum and minimum temperature in a shorter form:
+
+```{r}
+weather <- weather %>%
+  mutate(date = dmy(date),
+         rain = as.numeric(ifelse(precipitation == "T", "0.01", precipitation)),
+         s_fall = as.numeric(ifelse(`snow fall` == "T", "0.01", `snow fall`)),
+         s_depth = as.numeric(ifelse(`snow depth` == "T", "0.01", `snow depth`)),
+         all_precip = s_fall + rain,
+         has_snow = (s_fall > 0) | (s_depth > 0),
+         has_rain = rain > 0,
+         max_temp = `maximum temperature`,
+         min_temp = `minimum temperature`)
+```
+
+- **Data Joining**
+
+Now, we will join this formatted dataset to our training data using the common columns:
+
+```{r}
+foo <- weather %>%
+  select(date, rain, s_fall, all_precip, has_snow, has_rain, s_depth, max_temp, min_temp)
+
+train <- left_join(train, foo, by = "date")
+```
+
+
+
+
+
+
+
+### Exploratory Data Analysis
+
+4.1 As far as new information is concerned, We found out two new features for the data preparation such as speed and trip distance.
+We can find out two more directions and distance to the airport to find out and explore the data more.
+
+The proposed exploratory analysis would be to calculate these features. Viewing the visualization of weather reports on the trip duration.Find out correlation between these features for both the datasets.
+
+4.2 The types of plots that we'll be using to illustrate the findings will be coorelations matrix and plots 
+
+4.3 What we don't know right now is that whether the algorithms that we have chosen will be the best for our model or not. We might have to try various classification algorithms in order to find out the best training model.
+
+
+4.4 We will be using caret package to perform machine learning tasks with the help of random forests and gradient boosting decision tree algorithm.
+
+
+
+
+
+
+
