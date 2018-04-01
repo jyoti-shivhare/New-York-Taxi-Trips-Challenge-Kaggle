@@ -1,4 +1,4 @@
-# New-York-Taxi-Trips-Challenge-Kaggle
+# New-York-Taxi-Trips-Predictive-Analytics
 
 This project is made getting inspired by the challenge on Kaggle.
 There are two datasets that I have joined: 
